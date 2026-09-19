@@ -8,24 +8,34 @@ import os
 # ─── Paths ───────────────────────────────────────────────────────────────────
 ROOT_DIR       = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR       = os.path.join(ROOT_DIR, "data")
-HR_DIR         = "/kaggle/working/hr_tiles"          # EuroSAT .jpg flat folder on Kaggle
-SEG_DIR        = os.path.join(DATA_DIR, "seg")       # segmentation label patches
+HR_DIR         = "/kaggle/input/eurosat/EuroSAT"     # EuroSAT root on Kaggle
+                                                      # (subfolders = class names)
+SEG_DIR        = os.path.join(DATA_DIR, "seg")       # .npy labels (TiffDataset only)
 CHECKPOINT_DIR = os.path.join(ROOT_DIR, "checkpoints")
 
-# ─── Dataset mode ────────────────────────────────────────────────────────────
-USE_DUMMY = False   # True  → DummyDataset (random tensors, no files needed)
-                    # False → TiffDataset  from HR_DIR (EuroSAT .jpg on Kaggle)
+# ─── Dataset type ────────────────────────────────────────────────────────────
+# "folder"  → FolderDataset  — subfolder-per-class, no .npy files needed
+#             Works with: EuroSAT, UC Merced, any classification dataset
+# "tiff"    → TiffDataset    — flat dir of .tif + matching .npy seg labels
+#             Works with: real Sentinel-2 patches with pixel labels
+# "dummy"   → DummyDataset   — random tensors, zero files, for unit tests
+DATASET_TYPE = "folder"
 
 # ─── Image / Band Settings ───────────────────────────────────────────────────
-NUM_BANDS    = 4          # Sentinel-2 bands; EuroSAT RGB (3 ch) padded to 4
-PATCH_SIZE   = 64         # EuroSAT native size is 64×64 — use tiles as HR target
-LR_SIZE      = 16         # = PATCH_SIZE // 4  (16×16 LR input to the model)
-HR_SIZE      = PATCH_SIZE # SR target = original patch size  (64×64)
-SCALE_FACTOR = 4          # super-resolution upscale: LR_SIZE × 4 = HR_SIZE
+NUM_BANDS    = 4          # Model channel count; RGB images (3ch) are padded to 4
+PATCH_SIZE   = 64         # EuroSAT native = 64×64 (UC Merced = 256×256)
+LR_SIZE      = 16         # = PATCH_SIZE // SCALE_FACTOR
+HR_SIZE      = PATCH_SIZE # SR target size = original patch size
+SCALE_FACTOR = 4          # LR_SIZE × SCALE_FACTOR = HR_SIZE
 
 # ─── Segmentation ────────────────────────────────────────────────────────────
-NUM_CLASSES  = 6          # road, building, water, cropland, vegetation, other
-CLASS_NAMES  = ["road", "building", "water", "cropland", "vegetation", "other"]
+NUM_CLASSES  = 10         # EuroSAT: 10 land-use classes
+                          # UC Merced: 21 | Custom 6-class: 6
+CLASS_NAMES  = [          # EuroSAT class names (alphabetical = index order)
+    "AnnualCrop", "Forest", "HerbaceousVegetation", "Highway",
+    "Industrial", "Pasture", "PermanentCrop", "Residential",
+    "River", "SeaLake",
+]
 
 # ─── Model Architecture ──────────────────────────────────────────────────────
 SR_FEAT_CHANNELS  = 96   # intermediate feature channels tapped from SR backbone
@@ -76,3 +86,23 @@ PATCH_STRIDE = 48        # overlap stride for inference tiling
 
 # ─── Streamlit Demo ──────────────────────────────────────────────────────────
 DEMO_CHECKPOINT = os.path.join(CHECKPOINT_DIR, "best.pth")
+
+
+# ─── Quick-switch presets ─────────────────────────────────────────────────────
+# To switch datasets, uncomment ONE block and comment the others.
+
+# ── EuroSAT (active) ──────────────────────────────────────────────────────────
+# DATASET_TYPE = "folder"
+# HR_DIR       = "/kaggle/input/eurosat/EuroSAT"
+# PATCH_SIZE   = 64;  LR_SIZE = 16;  HR_SIZE = 64
+# NUM_CLASSES  = 10
+
+# ── UC Merced ─────────────────────────────────────────────────────────────────
+# DATASET_TYPE = "folder"
+# HR_DIR       = "/kaggle/input/uc-merced-land-use/UCMerced_LandUse/Images"
+# PATCH_SIZE   = 256; LR_SIZE = 64; HR_SIZE = 256
+# NUM_CLASSES  = 21
+
+# ── DummyDataset (offline testing) ────────────────────────────────────────────
+# DATASET_TYPE = "dummy"
+# (everything else stays the same)

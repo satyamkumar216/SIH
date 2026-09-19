@@ -268,6 +268,164 @@ class TiffDataset(Dataset):
         return lr_t, hr_t, seg
 
 
+# ─── FolderDataset ────────────────────────────────────────────────────────────
+
+class FolderDataset(Dataset):
+    """
+    Dataset for image-classification-style folders (EuroSAT, UC Merced, etc.)
+    where the folder name IS the class label and no .npy segmentation files exist.
+
+    Supported directory structures
+    ─────────────────────────────
+    Subfolder-per-class (EuroSAT native, UC Merced):
+        hr_dir/
+            AnnualCrop/   ← class 0  (sorted alphabetically)
+            Forest/       ← class 1
+            Highway/      ← class 2
+            ...
+
+    Flat folder (all images in one dir, no class structure):
+        hr_dir/
+            img001.jpg    ← all assigned class 0
+            img002.jpg
+
+    Seg label strategy
+    ──────────────────
+    Every PIXEL in a patch gets the same class index (the folder/class label).
+    This is a uniform/fake label — correct for scene-classification datasets
+    that don't have pixel-level masks.  The model still learns to associate
+    patch texture → class, which is sufficient for a demo and trains cleanly.
+
+    Parameters
+    ----------
+    hr_dir            : root directory (contains class subfolders OR flat images)
+    num_bands         : output spectral bands (RGB → 3ch padded to num_bands)
+    patch_size        : spatial size of the HR output (resize images to this)
+    scale             : LR synthesis downscale factor
+    blur_sigma_range  : (min, max) random Gaussian blur sigma
+    noise_std_max     : max Gaussian noise std (0–255 range)
+    """
+
+    VALID_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+
+    def __init__(
+        self,
+        hr_dir: str,
+        num_bands: int          = 4,
+        patch_size: int         = 64,
+        scale: int              = 4,
+        blur_sigma_range: tuple = (0.5, 2.0),
+        noise_std_max: float    = 15.0,
+    ):
+        self.hr_dir          = hr_dir
+        self.num_bands       = num_bands
+        self.patch_size      = patch_size
+        self.lr_size         = patch_size // scale
+        self.scale           = scale
+        self.blur_sigma_range = blur_sigma_range
+        self.noise_std_max   = noise_std_max
+
+        # ── Discover class subfolders ─────────────────────────────────────────
+        # A subfolder counts as a class folder if it contains at least one image.
+        subdirs = sorted(
+            d for d in os.listdir(hr_dir)
+            if os.path.isdir(os.path.join(hr_dir, d))
+        )
+        class_subfolders = [
+            d for d in subdirs
+            if any(
+                os.path.splitext(f)[1].lower() in self.VALID_EXTS
+                for f in os.listdir(os.path.join(hr_dir, d))
+            )
+        ]
+
+        if class_subfolders:
+            # Subfolder-per-class mode
+            self.class_names = class_subfolders          # sorted → consistent index
+            self.class_to_idx = {c: i for i, c in enumerate(class_subfolders)}
+            # Build flat list of (abs_path, class_idx)
+            self.samples = []
+            for cls in class_subfolders:
+                cls_dir = os.path.join(hr_dir, cls)
+                for fname in sorted(os.listdir(cls_dir)):
+                    if os.path.splitext(fname)[1].lower() in self.VALID_EXTS:
+                        self.samples.append(
+                            (os.path.join(cls_dir, fname), self.class_to_idx[cls])
+                        )
+        else:
+            # Flat mode — all images in hr_dir, no class structure
+            self.class_names  = ["unknown"]
+            self.class_to_idx = {"unknown": 0}
+            self.samples = [
+                (os.path.join(hr_dir, f), 0)
+                for f in sorted(os.listdir(hr_dir))
+                if os.path.splitext(f)[1].lower() in self.VALID_EXTS
+            ]
+
+        if not self.samples:
+            raise RuntimeError(
+                f"FolderDataset: no images found in {hr_dir}\n"
+                "Expected subfolders-per-class (EuroSAT) or flat .jpg/.png files."
+            )
+
+        print(
+            f"[FolderDataset] {len(self.samples)} images | "
+            f"{len(self.class_names)} classes: {self.class_names}"
+        )
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int):
+        img_path, class_idx = self.samples[idx]
+
+        # ── Load image (PIL → (num_bands, H, W) float32 [0, 1]) ─────────────
+        hr = _load_image(img_path, self.num_bands)   # (C, H, W)
+
+        # ── Resize to patch_size × patch_size if needed ───────────────────────
+        _, H, W = hr.shape
+        if H != self.patch_size or W != self.patch_size:
+            if _PIL:
+                hr_list = []
+                for c in range(hr.shape[0]):
+                    ch     = (hr[c] * 255).clip(0, 255).astype(np.uint8)
+                    pil_ch = Image.fromarray(ch).resize(
+                        (self.patch_size, self.patch_size), Image.BICUBIC
+                    )
+                    hr_list.append(np.array(pil_ch).astype(np.float32) / 255.0)
+                hr = np.stack(hr_list)
+            else:
+                # Nearest-neighbour crop as last resort
+                hr = hr[:, :self.patch_size, :self.patch_size]
+
+        # ── Synthesise LR ─────────────────────────────────────────────────────
+        sigma     = np.random.uniform(*self.blur_sigma_range)
+        noise_std = np.random.uniform(0, self.noise_std_max)
+        lr_up     = _degrade(hr, sigma=sigma, noise_std=noise_std, scale=self.scale)
+        # _degrade returns (C, patch_size, patch_size) — resize to (C, lr_size, lr_size)
+        if _PIL:
+            lr_list = []
+            for c in range(lr_up.shape[0]):
+                ch     = (lr_up[c] * 255).clip(0, 255).astype(np.uint8)
+                pil_ch = Image.fromarray(ch).resize(
+                    (self.lr_size, self.lr_size), Image.BICUBIC
+                )
+                lr_list.append(np.array(pil_ch).astype(np.float32) / 255.0)
+            lr = np.stack(lr_list)
+        else:
+            lr = lr_up[:, ::self.scale, ::self.scale]
+
+        # ── Uniform seg label from folder/class name ──────────────────────────
+        # Every pixel in the patch = class_idx (scene-level classification label)
+        seg = torch.full(
+            (self.patch_size, self.patch_size), class_idx, dtype=torch.long
+        )
+
+        lr_t = torch.from_numpy(lr)   # (C, lr_size, lr_size)
+        hr_t = torch.from_numpy(hr)   # (C, patch_size, patch_size)
+        return lr_t, hr_t, seg
+
+
 # ─── DummyDataset ─────────────────────────────────────────────────────────────
 
 class DummyDataset(Dataset):

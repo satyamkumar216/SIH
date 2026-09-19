@@ -34,7 +34,7 @@ from torch.utils.data import DataLoader
 # ── local imports ─────────────────────────────────────────────────────────────
 import config as cfg
 from model import build_model
-from dataset import TiffDataset, DummyDataset
+from dataset import TiffDataset, FolderDataset, DummyDataset
 from metrics import psnr, ssim, MeanIoU
 
 
@@ -137,11 +137,10 @@ def compute_loss(
 
 def build_loaders(use_dummy: bool = None):
     # use_dummy=None → read from config; explicit True/False overrides
-    if use_dummy is None:
-        use_dummy = getattr(cfg, "USE_DUMMY", False)
-    if use_dummy or not os.path.isdir(cfg.HR_DIR):
+    dataset_type = getattr(cfg, "DATASET_TYPE", "tiff").lower()
 
-        print("[dataset] Using DummyDataset (no real data found).")
+    if dataset_type == "dummy":
+        print("[dataset] DummyDataset — random tensors, no files.")
         train_ds = DummyDataset(
             length=64,
             num_bands=cfg.NUM_BANDS,
@@ -156,8 +155,27 @@ def build_loaders(use_dummy: bool = None):
             hr_size=cfg.HR_SIZE,
             num_classes=cfg.NUM_CLASSES,
         )
-    else:
-        print(f"[dataset] Loading TiffDataset from {cfg.HR_DIR}")
+
+    elif dataset_type == "folder":
+        print(f"[dataset] FolderDataset from {cfg.HR_DIR}")
+        full_ds = FolderDataset(
+            hr_dir=cfg.HR_DIR,
+            num_bands=cfg.NUM_BANDS,
+            patch_size=cfg.HR_SIZE,
+            scale=cfg.SCALE_FACTOR,
+            blur_sigma_range=(cfg.BLUR_SIGMA_MIN, cfg.BLUR_SIGMA_MAX),
+            noise_std_max=cfg.NOISE_STD_MAX,
+        )
+        # 90/10 train/val split
+        n_val    = max(1, int(0.1 * len(full_ds)))
+        n_train  = len(full_ds) - n_val
+        train_ds, val_ds = torch.utils.data.random_split(
+            full_ds, [n_train, n_val],
+            generator=torch.Generator().manual_seed(42),
+        )
+
+    else:  # "tiff"
+        print(f"[dataset] TiffDataset from {cfg.HR_DIR}")
         train_ds = TiffDataset(
             hr_dir=cfg.HR_DIR,
             seg_dir=cfg.SEG_DIR,
@@ -168,7 +186,7 @@ def build_loaders(use_dummy: bool = None):
             noise_std_max=cfg.NOISE_STD_MAX,
             num_classes=cfg.NUM_CLASSES,
         )
-        val_ds = train_ds   # replace with separate val split if available
+        val_ds = train_ds   # replace with a separate val split when available
 
     train_loader = DataLoader(
         train_ds,
