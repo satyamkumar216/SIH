@@ -362,6 +362,7 @@ def main():
             )
             if val_m["psnr"] > best_val_psnr:
                 best_val_psnr = val_m["psnr"]
+                os.makedirs(cfg.CHECKPOINT_DIR, exist_ok=True)
                 best_path = os.path.join(cfg.CHECKPOINT_DIR, "best.pth")
                 torch.save(
                     {"epoch": epoch, "model_state": model.state_dict(),
